@@ -1,0 +1,15 @@
+[submodule "modules/emsdk"]
+	path = modules/emsdk
+	url = https://github.com/emscripten-core/emsdk.git
+[submodule "modules/ffmpeg"]
+	path = modules/ffmpeg
+	url = https://github.com/FFmpeg/FFmpeg.git
+[submodule "modules/rubberband"]
+	path = modules/rubberband
+	url = https://github.com/breakfastquay/rubberband.git
+[submodule "modules/libsndfile"]
+	path = modules/libsndfile
+	url = https://github.com/libsndfile/libsndfile.git
+[submodule "modules/libsamplerate"]
+	path = modules/libsamplerate
+	url = https://github.com/libsndfile/libsamplerate.git
