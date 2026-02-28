@@ -15,15 +15,16 @@ done
 if [ ${#cmds[@]} -ne 0 ];
 then
   if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    apt-get update
-    apt-get install -y ${cmds[@]}
+    sudo apt-get update
+    sudo apt-get install -y ${cmds[@]}
   else
     brew install ${cmds[@]}
   fi
 fi
 
 cd modules/emsdk/
-git pull
+# Update emsdk if possible (may fail on fresh submodule checkout - that's OK)
+git pull 2>/dev/null || true
 ./emsdk install 3.1.2
 ./emsdk activate 3.1.2
 cd ../../

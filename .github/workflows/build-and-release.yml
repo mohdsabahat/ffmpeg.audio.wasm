@@ -34,6 +34,24 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      # ── 1b. Verify submodules were checked out ────────────────────────────────
+      - name: Verify submodules
+        run: |
+          echo "=== Checking submodule status ==="
+          git submodule status
+          echo "=== Listing modules directory ==="
+          ls -la modules/ || echo "ERROR: modules/ directory not found!"
+          echo "=== Verifying key submodules exist ==="
+          for dir in modules/emsdk modules/ffmpeg modules/rubberband modules/libsamplerate modules/libsndfile modules/lame modules/Ogg modules/opus modules/vorbis; do
+            if [ -d "$dir" ]; then
+              echo "OK: $dir exists"
+            else
+              echo "ERROR: $dir missing - attempting manual init"
+              git submodule update --init --recursive
+              break
+            fi
+          done
+
       # ── 2. Install system dependencies (same packages init-dependencies needs) ─
       - name: Install system build dependencies
         run: |
@@ -45,16 +63,25 @@ jobs:
 
       # ── 3. Fix git safe.directory (needed so scripts can call git inside /src) ─
       - name: Fix git safe.directory
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/modules/emsdk"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/modules/ffmpeg"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/modules/rubberband"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/modules/libsamplerate"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/modules/libsndfile"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/modules/lame"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/modules/Ogg"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/modules/opus"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/modules/vorbis"
 
       # ── 4. Bootstrap Emscripten from the repo's own emsdk submodule ───────────
-      # init-dependencies.sh calls ./emsdk install + activate inside modules/emsdk/
-      # We run it directly here so it's available for the build step.
+      # Using version 3.1.2 to match init-dependencies.sh
       - name: Set up Emscripten (via repo's own emsdk submodule)
         run: |
           cd modules/emsdk
-          ./emsdk install  latest
-          ./emsdk activate latest
+          ./emsdk install 3.1.2
+          ./emsdk activate 3.1.2
           # Source the env so emcc is on PATH for subsequent steps
           source ./emsdk_env.sh
           emcc -v
@@ -90,12 +117,12 @@ jobs:
           find build -name '*.wasm' -o -name '*.js' | sort
 
       # ── 7. Locate the output files ────────────────────────────────────────────
-      # Known output path is build/ffmpeg.audio.core/v5-full/
+      # Build script outputs to build/wasm/
       # Falls back to searching if the path ever changes.
       - name: Locate build outputs
         id: locate
         run: |
-          OUT_DIR="build/ffmpeg.audio.core/v5-full"
+          OUT_DIR="build/wasm"
           if [ ! -f "$OUT_DIR/ffmpeg.wasm" ]; then
             echo "WARNING: expected output not at $OUT_DIR — searching..."
             WASM=$(find build -name 'ffmpeg.wasm' | head -1)

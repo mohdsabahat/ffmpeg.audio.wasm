@@ -13,3 +13,15 @@
 [submodule "modules/libsamplerate"]
 	path = modules/libsamplerate
 	url = https://github.com/libsndfile/libsamplerate.git
+[submodule "modules/Ogg"]
+	path = modules/Ogg
+	url = https://github.com/xiph/ogg.git
+[submodule "modules/opus"]
+	path = modules/opus
+	url = https://github.com/xiph/opus.git
+[submodule "modules/vorbis"]
+	path = modules/vorbis
+	url = https://github.com/xiph/vorbis.git
+[submodule "modules/lame"]
+	path = modules/lame
+	url = https://github.com/lameproject/lame.git
