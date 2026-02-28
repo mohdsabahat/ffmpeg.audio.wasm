@@ -1,19 +1,19 @@
 name: Build FFmpeg WASM and Release
 
 on:
-  # ── Trigger manually from the Actions tab ──
+  # Trigger manually from the Actions tab
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag  (e.g. v1.0.0)'
+        description: 'Release tag (e.g. v1.0.0)'
         required: true
         default: 'v1.0.0'
       release_name:
         description: 'Release title'
         required: true
-        default: 'FFmpeg WASM — rubberband + afir'
+        default: 'FFmpeg WASM - rubberband + afir'
 
-  # ── OR push a git tag:  git tag v1.0.0 && git push --tags ──
+  # OR push a git tag:  git tag v1.0.0 && git push --tags
   push:
     tags:
       - 'v*.*.*'
@@ -21,119 +21,122 @@ on:
 jobs:
   build:
     name: Build FFmpeg WASM
-    runs-on: ubuntu-latest
-    timeout-minutes: 360          # build takes 45-90 min; 6h hard cap
+    runs-on: ubuntu-22.04      # pinned to jammy — same as emsdk base image
+    timeout-minutes: 360       # build takes 45-90 min; 6h hard cap
 
     steps:
-      # ── 1. Checkout repo + ALL submodules (ffmpeg, rubberband, etc.) ──────────
-      - name: Checkout repository with submodules
+      # ── 1. Checkout WITH submodules ───────────────────────────────────────────
+      # The repo manages its own Emscripten via modules/emsdk (a git submodule).
+      # We must check out ALL submodules — ffmpeg, rubberband, emsdk, etc.
+      - name: Checkout repository with all submodules
         uses: actions/checkout@v4
         with:
-          submodules: recursive   # pulls modules/ffmpeg and all other submodules
+          submodules: recursive
           fetch-depth: 0
 
-      # ── 2. Cache compiled libs to speed up re-runs ───────────────────────────
-      #    Cache key is tied to submodule commit hashes so it auto-invalidates
-      #    when any dependency changes.
-      - name: Generate submodule hash for cache key
+      # ── 2. Install system dependencies (same packages init-dependencies needs) ─
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            autoconf automake libtool pkg-config ragel \
+            build-essential cmake python3 python3-pip \
+            git wget curl zip unzip
+
+      # ── 3. Fix git safe.directory (needed so scripts can call git inside /src) ─
+      - name: Fix git safe.directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # ── 4. Bootstrap Emscripten from the repo's own emsdk submodule ───────────
+      # init-dependencies.sh calls ./emsdk install + activate inside modules/emsdk/
+      # We run it directly here so it's available for the build step.
+      - name: Set up Emscripten (via repo's own emsdk submodule)
+        run: |
+          cd modules/emsdk
+          ./emsdk install  latest
+          ./emsdk activate latest
+          # Source the env so emcc is on PATH for subsequent steps
+          source ./emsdk_env.sh
+          emcc -v
+
+      # ── 5. Cache compiled third-party libs (rubberband, lame, opus, etc.) ─────
+      # Key on submodule hashes — cache busts automatically when deps change.
+      - name: Generate cache key from submodule hashes
         id: submodule-hash
         run: echo "hash=$(git submodule status | sha256sum | cut -c1-16)" >> $GITHUB_OUTPUT
 
-      - name: Cache build artefacts
+      - name: Cache build directory
         uses: actions/cache@v4
         with:
-          path: build
-          key: ffmpeg-wasm-${{ runner.os }}-${{ steps.submodule-hash.outputs.hash }}
+          path: |
+            build/wasm
+            build/lib
+            build/include
+          key: ffmpeg-wasm-libs-${{ runner.os }}-${{ steps.submodule-hash.outputs.hash }}
           restore-keys: |
-            ffmpeg-wasm-${{ runner.os }}-
+            ffmpeg-wasm-libs-${{ runner.os }}-
 
-      # ── 3. Run the full build inside the official Emscripten Docker image ─────
-      #    Emscripten 3.1.29 is a known-stable version for audio WASM builds.
-      #    If the build fails with a version error, try: 3.1.20 or 3.1.46
-      - name: Pull Emscripten Docker image
-        run: docker pull emscripten/emsdk:3.1.29
-
+      # ── 6. Run the full build ─────────────────────────────────────────────────
+      # Source emsdk_env.sh first so emcc/emmake/emconfigure are on PATH,
+      # then delegate to the repo's own build.sh which chains all build-*.sh files.
       - name: Build FFmpeg WASM
         run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/src" \
-            -w /src \
-            emscripten/emsdk:3.1.29 \
-            bash -c "
-              set -euo pipefail
+          source modules/emsdk/emsdk_env.sh
+          echo "=== emcc version ==="
+          emcc -v
+          echo "=== Starting build ==="
+          bash build/scripts/build.sh
+          echo "=== Build finished — output files ==="
+          find build -name '*.wasm' -o -name '*.js' | sort
 
-              echo '=== Emscripten version ==='
-              emcc -v
-
-              echo '=== Initialising dependencies ==='
-              bash build/scripts/init-dependencies.sh
-
-              echo '=== Starting full build ==='
-              bash build/scripts/build.sh
-
-              echo '=== Build complete - listing outputs ==='
-              find build -name '*.wasm' -o -name '*.js' | head -40
-            "
-
-      # ── 4. Locate and verify the output files ────────────────────────────────
-      #    Primary output path is build/ffmpeg.audio.core/v5-full/
-      #    Falls back to searching the whole build/ tree as a safety net.
+      # ── 7. Locate the output files ────────────────────────────────────────────
+      # Known output path is build/ffmpeg.audio.core/v5-full/
+      # Falls back to searching if the path ever changes.
       - name: Locate build outputs
         id: locate
         run: |
-          echo "=== All JS/WASM files in build/ ==="
-          find build -name '*.wasm' -o -name '*.js' | sort
-
-          # Try the known output path first
           OUT_DIR="build/ffmpeg.audio.core/v5-full"
           if [ ! -f "$OUT_DIR/ffmpeg.wasm" ]; then
-            echo "WARNING: v5-full output not found - searching build/ tree"
+            echo "WARNING: expected output not at $OUT_DIR — searching..."
             WASM=$(find build -name 'ffmpeg.wasm' | head -1)
             if [ -z "$WASM" ]; then
-              echo "ERROR: Could not find ffmpeg.wasm anywhere in build/"
+              echo "ERROR: ffmpeg.wasm not found anywhere in build/"
               exit 1
             fi
             OUT_DIR=$(dirname "$WASM")
           fi
-
           echo "out_dir=$OUT_DIR" >> $GITHUB_OUTPUT
-          echo "Using output dir: $OUT_DIR"
+          echo "Found outputs in: $OUT_DIR"
           ls -lh "$OUT_DIR"
 
-      # ── 5. Package everything ─────────────────────────────────────────────────
+      # ── 8. Package artefacts ──────────────────────────────────────────────────
       - name: Package artefacts
         run: |
           OUT="${{ steps.locate.outputs.out_dir }}"
-
-          # Zip of the three raw files (most users want this)
           zip -j ffmpeg-audio-wasm.zip \
             "$OUT/ffmpeg.js" \
             "$OUT/ffmpeg.wasm" \
             "$OUT/ffmpeg.worker.js"
-
-          # Individual .gz versions for CDN self-hosting
-          # (serve with Content-Encoding: gzip header)
           gzip --force -9 -c "$OUT/ffmpeg.wasm"      > ffmpeg.wasm.gz
           gzip --force -9 -c "$OUT/ffmpeg.js"        > ffmpeg.js.gz
           gzip --force -9 -c "$OUT/ffmpeg.worker.js" > ffmpeg.worker.js.gz
-
-          echo "=== Final release files ==="
+          echo "=== Release files ==="
           ls -lh ffmpeg-audio-wasm.zip ffmpeg.wasm.gz ffmpeg.js.gz ffmpeg.worker.js.gz
 
-      # ── 6. Resolve release tag and title ─────────────────────────────────────
-      - name: Resolve release metadata
+      # ── 9. Resolve release metadata ───────────────────────────────────────────
+      - name: Resolve release tag and title
         id: meta
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.tag }}"            >> $GITHUB_OUTPUT
-            echo "name=${{ github.event.inputs.release_name }}"  >> $GITHUB_OUTPUT
+            echo "tag=${{ github.event.inputs.tag }}"           >> $GITHUB_OUTPUT
+            echo "name=${{ github.event.inputs.release_name }}" >> $GITHUB_OUTPUT
           else
             TAG="${GITHUB_REF#refs/tags/}"
-            echo "tag=$TAG"                                       >> $GITHUB_OUTPUT
-            echo "name=FFmpeg WASM $TAG - rubberband + afir"     >> $GITHUB_OUTPUT
+            echo "tag=$TAG"                                      >> $GITHUB_OUTPUT
+            echo "name=FFmpeg WASM $TAG - rubberband + afir"    >> $GITHUB_OUTPUT
           fi
 
-      # ── 7. Publish GitHub Release ─────────────────────────────────────────────
+      # ── 10. Publish GitHub Release ────────────────────────────────────────────
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -151,25 +154,23 @@ jobs:
             |---------|--------|
             | `rubberband` pitch shift and time stretch | YES |
             | `afir` convolution reverb / impulse response | YES |
-            | `--enable-rdft` FFT support (required by afir) | YES |
+            | `--enable-rdft` FFT (required by afir) | YES |
             | 100+ audio filters (aecho, equalizer, compand, etc.) | YES |
             | Decoders: mp3, aac, opus, flac, wav, ogg, wma | YES |
             | Encoders: mp3, aac, opus, flac, wav | YES |
 
-            ### Which file do I download?
-            | File | Use when... |
+            ### Files
+            | File | Description |
             |------|-------------|
-            | `ffmpeg-audio-wasm.zip` | You want all 3 files in one download (start here) |
-            | `ffmpeg.js` | JS glue code — load this in your app |
-            | `ffmpeg.wasm` | Main binary — must be served alongside ffmpeg.js |
-            | `ffmpeg.worker.js` | Web Worker — required for multi-thread mode |
-            | `ffmpeg.wasm.gz` | Pre-compressed WASM for CDN (serve with `Content-Encoding: gzip`) |
-            | `ffmpeg.js.gz` | Pre-compressed JS for CDN |
-            | `ffmpeg.worker.js.gz` | Pre-compressed worker for CDN |
+            | `ffmpeg-audio-wasm.zip` | All 3 files zipped — start here |
+            | `ffmpeg.js` | JS glue code |
+            | `ffmpeg.wasm` | Main binary |
+            | `ffmpeg.worker.js` | Web Worker |
+            | `*.gz` | Pre-compressed versions for CDN use |
 
             ### Usage — afir (convolution reverb)
             ```js
-            // afir needs TWO inputs: dry audio + an impulse response file
+            // afir needs TWO inputs: dry audio + impulse response
             await ffmpeg.run(
               '-i', 'dry.wav',
               '-i', 'impulse_response.wav',
@@ -177,7 +178,6 @@ jobs:
               'output.wav'
             );
             ```
-
             ### Usage — rubberband (pitch shift)
             ```js
             await ffmpeg.run(
